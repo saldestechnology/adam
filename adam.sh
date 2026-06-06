@@ -5,6 +5,53 @@
 set -o pipefail
 
 # =====================================================================
+# Helper: invoke opencode, parse JSON output to extract text content.
+# Requires Docker -t flag (pseudo-TTY) for --format json to work.
+# =====================================================================
+invoke_opencode() {
+  local model="$1"
+  local prompt="$2"
+  local timeout_sec="${3:-300}"
+  shift 3
+  local -a files=("$@")
+
+  # Build file attachment flags
+  local -a file_args=()
+  for f in "${files[@]}"; do
+    file_args+=("--file" "$f")
+  done
+
+  # Run opencode with JSON format. The prompt is passed as a positional arg.
+  # Redirect stderr to stdout so we capture all JSON events.
+  timeout "$timeout_sec" \
+    opencode run "$prompt" --model "$model" --format json "${file_args[@]}" 2>&1 | \
+    python3 -c "
+import json, sys
+
+text_parts = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        event = json.loads(line)
+        if event.get('type') == 'text':
+            part = event.get('part', {})
+            if part.get('type') == 'text':
+                text_parts.append(part.get('text', ''))
+    except json.JSONDecodeError:
+        continue
+
+result = ''.join(text_parts)
+if not result.strip():
+    sys.stderr.write('Error: No text content found in JSON events\n')
+    sys.exit(1)
+
+sys.stdout.write(result)
+"
+}
+
+# =====================================================================
 # Configuration
 # =====================================================================
 OUTPUT_DIR="${OUTPUT_DIR:-.}"
@@ -106,14 +153,11 @@ INSTRUCTIONS:
 7. Output ONLY the raw specification document. No markdown code wrappers. No preamble. No apologies.
 8. The first line of your output MUST be '---' (the YAML frontmatter opener)."
 
-# Write prompt to a temp file and invoke the Python PTY wrapper
-echo "$SPEC_PROMPT" > /tmp/prompt_spec.txt
-
 echo "   [LLM] Generating spec via opencode..."
-GENERATED_SPEC=$(python3 /app/opencode_wrapper.py --prompt-file /tmp/prompt_spec.txt --model "$MODEL_NAME" --timeout 60)
+GENERATED_SPEC=$(invoke_opencode "$MODEL_NAME" "$SPEC_PROMPT" 60)
 spec_exit=$?
 
-if [ "$spec_exit" -ne 0 ]; then
+if [ "$spec_exit" -ne 0 ] && [ "$spec_exit" -ne 124 ]; then
   echo "   Error: opencode failed (exit $spec_exit)."
   cd "$ROOT_DIR"
   git worktree remove --force "$WORKTREE_DIR" &>/dev/null
@@ -153,29 +197,41 @@ success=false
 while [ $iteration -le $MAX_LOOPS ]; do
   echo "-> Iteration $iteration/$MAX_LOOPS"
 
-  # Write prompt to a temp file
-  echo "You are a stateless Rust code generator.
+  # Read current state
+  SPEC_CONTENT=$(cat "$SPEC_FILE")
+  LAST_CODE=$(cat "$TEMP_CODE")
+  LAST_ERROR=$(cat "$ERROR_LOG")
 
-Read the specification from ./spec.txt and the compiler errors from ./compiler_errors.log.
+  # Write state to temp files to avoid "Argument list too long"
+  echo "$SPEC_CONTENT" > /tmp/spec_for_llm.txt
+  echo "$LAST_CODE" > /tmp/code_for_llm.txt
+  echo "$LAST_ERROR" > /tmp/error_for_llm.txt
 
-Write a complete, compilable Rust library to ./src/lib.rs that satisfies the specification and fixes all errors.
+  CODE_PROMPT="You are a stateless Rust code generator. Read the attached specification, previous code, and compiler errors. Write a complete, compilable Rust library that satisfies the specification and fixes all errors. Output ONLY raw Rust code without apologies or markdown wrappers."
 
-Use the write tool to create the file. Do not wrap your response in markdown code blocks." > /tmp/prompt_code.txt
-
-  echo "   [LLM] Running opencode with PTY wrapper (5min timeout)..."
-  python3 /app/opencode_wrapper.py --prompt-file /tmp/prompt_code.txt --model "$MODEL_NAME" --timeout 300 > /dev/null 2>&1
+  echo "   [LLM] Querying opencode for code generation..."
+  GENERATED_CODE=$(invoke_opencode "$MODEL_NAME" "$CODE_PROMPT" 300 \
+    /tmp/spec_for_llm.txt /tmp/code_for_llm.txt /tmp/error_for_llm.txt)
   gen_exit=$?
 
-  if [ "$gen_exit" -ne 0 ]; then
-    echo "   Warning: opencode wrapper exited with code $gen_exit."
-  fi
+  # Save raw response for debugging
+  echo "$GENERATED_CODE" > "debug_response_${iteration}.txt"
 
-  # The model should have used the write tool to create/update src/lib.rs.
-  # Read whatever is there now.
-  if [ ! -s "$TEMP_CODE" ]; then
-    echo "   Error: src/lib.rs is empty after opencode run."
+  if [ "$gen_exit" -ne 0 ] && [ "$gen_exit" -ne 124 ]; then
+    echo "   Error: opencode failed (exit $gen_exit)."
     break
   fi
+
+  if [ -z "$GENERATED_CODE" ]; then
+    echo "   Error: opencode returned empty code."
+    break
+  fi
+
+  # Strip markdown wrappers
+  GENERATED_CODE=$(echo "$GENERATED_CODE" | sed -e 's/```rust//g' -e 's/```//g')
+
+  # Tabula Rasa: overwrite the target
+  echo "$GENERATED_CODE" > "$TEMP_CODE"
 
   # Sentinel: Compiler Check
   echo "   [Sentinel] Compiling..."
@@ -207,6 +263,7 @@ if [ "$success" = true ]; then
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$WORKTREE_DIR/$SPEC_FILE" "$OUTPUT_DIR/spec_$TIMESTAMP.md"
   cp "$WORKTREE_DIR/$TEMP_CODE" "$OUTPUT_DIR/lib_$TIMESTAMP.rs"
+  cp "$WORKTREE_DIR"/debug_response_*.txt "$OUTPUT_DIR/" 2>/dev/null || true
   echo "   Spec:  $OUTPUT_DIR/spec_$TIMESTAMP.md"
   echo "   Code:  $OUTPUT_DIR/lib_$TIMESTAMP.rs"
 
@@ -235,6 +292,7 @@ else
 
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$WORKTREE_DIR/$SPEC_FILE" "$OUTPUT_DIR/spec_failed_$TIMESTAMP.md" 2>/dev/null || true
+  cp "$WORKTREE_DIR"/debug_response_*.txt "$OUTPUT_DIR/" 2>/dev/null || true
   cp "$WORKTREE_DIR/$TEMP_CODE" "$OUTPUT_DIR/lib_failed_$TIMESTAMP.rs" 2>/dev/null || true
   cp "$WORKTREE_DIR/$ERROR_LOG" "$OUTPUT_DIR/errors_$TIMESTAMP.log" 2>/dev/null || true
 fi
