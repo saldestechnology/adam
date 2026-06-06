@@ -1,0 +1,39 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: compiled-ai-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    networks:
+      - compiled-ai-net
+
+  miner:
+    image: compiled-ai-loop-test:latest
+    container_name: compiled-ai-miner
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    volumes:
+      - ./output:/output
+      - ./scripts/embed_and_push.py:/app/scripts/embed_and_push.py:ro
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=compiled_ai_specs
+      - OUTPUT_DIR=/output
+      - CARGO_HOME=/output/.cargo
+      - XDG_CONFIG_HOME=/output/.config
+      - XDG_CACHE_HOME=/output/.cache
+    networks:
+      - compiled-ai-net
+
+volumes:
+  qdrant_storage:
+    driver: local
+
+networks:
+  compiled-ai-net:
+    driver: bridge
