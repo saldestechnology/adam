@@ -1,24 +1,13 @@
 # Compiled AI — Autonomous Rust Spec Miner
 # Dockerfile with: Rust toolchain, opencode, ctx, Python, embedding model, harvest binary
-# Multi-stage: builders first, runtime last.
+# Multi-stage: harvest builder → runtime (ctx is prebuilt externally due to DuckDB C++ memory requirements)
 
-# Stage 1a: Build the harvest AST hasher
+# Stage 1: Build the harvest AST hasher
 FROM rust:latest AS harvest-builder
 WORKDIR /build
 COPY harvest/Cargo.toml harvest/Cargo.lock ./
 COPY harvest/src ./src
 RUN cargo build --release
-
-# Stage 1b: Build ctx (code intelligence) with limited parallelism to avoid OOM
-FROM rust:latest AS ctx-builder
-RUN apt-get update && apt-get install -y cmake pkg-config && rm -rf /var/lib/apt/lists/*
-RUN cd /tmp && \
-    git clone --depth 1 https://github.com/saldestechnology/ctx.git && \
-    cd ctx && \
-    MAKEFLAGS="-j1" NUM_JOBS=1 CARGO_BUILD_JOBS=1 cmake --build . --parallel 1 2>/dev/null || true && \
-    MAKEFLAGS="-j1" NUM_JOBS=1 CARGO_BUILD_JOBS=1 cargo build --release && \
-    cp target/release/ctx /tmp/ctx-built && \
-    chmod +x /tmp/ctx-built
 
 # Stage 2: Final runtime image
 FROM rust:latest
@@ -62,7 +51,10 @@ RUN git init && git config user.email "adam@docker.local" && git config user.nam
 COPY --from=harvest-builder /build/target/release/harvest /usr/local/bin/harvest
 RUN chmod +x /usr/local/bin/harvest
 
-COPY --from=ctx-builder /tmp/ctx-built /usr/local/bin/ctx
+# Copy prebuilt ctx (code intelligence) binary
+# Built externally in a standalone container with full memory access because
+# DuckDB C++ compilation requires ~1.5-2GB peak RAM.
+COPY ctx-linux-aarch64 /usr/local/bin/ctx
 RUN chmod +x /usr/local/bin/ctx
 
 # Copy application scripts
