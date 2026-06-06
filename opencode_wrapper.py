@@ -1,107 +1,125 @@
 #!/usr/bin/env python3
 """
-Opencode TTY Wrapper
+Opencode PTY Wrapper
 
-Uses the `script` command to force a pseudo-TTY for opencode run,
-then extracts the assistant's text response from the captured output.
-This is necessary because opencode run requires interactive TTY mode
-to produce model responses, but subshells and pipes break TTY detection.
+Runs opencode inside a pseudo-TTY (required for tool access),
+reads the prompt from a file (to avoid command-line length limits),
+and extracts the assistant's text response.
 """
 
 import argparse
 import os
+import pty
 import re
-import subprocess
+import select
 import sys
-import tempfile
 
 
 def strip_ansi(text):
-    """Remove ANSI escape codes from text."""
     ansi_escape = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     return ansi_escape.sub('', text)
 
 
-def extract_assistant_text(clean_output):
-    """Extract the assistant's text response from the captured output."""
-    lines = clean_output.split('\n')
+def run_opencode(prompt, model, timeout_sec=300):
+    master_fd, slave_fd = pty.openpty()
+    pid = os.fork()
+
+    if pid == 0:
+        # Child: set up the slave as stdin/stdout/stderr
+        os.close(master_fd)
+        os.setsid()
+        os.dup2(slave_fd, 0)
+        os.dup2(slave_fd, 1)
+        os.dup2(slave_fd, 2)
+        if slave_fd > 2:
+            os.close(slave_fd)
+
+        # Execute opencode
+        os.execvp("opencode", ["opencode", "run", prompt, "--model", model])
+        os._exit(1)
+
+    # Parent: read from master_fd with timeout
+    os.close(slave_fd)
+    output = []
+
+    try:
+        import time
+        start = time.time()
+        while True:
+            elapsed = time.time() - start
+            remaining = timeout_sec - elapsed
+            if remaining <= 0:
+                break
+
+            ready, _, _ = select.select([master_fd], [], [], max(0, remaining))
+            if not ready:
+                break
+
+            try:
+                data = os.read(master_fd, 8192)
+                if not data:
+                    break
+                output.append(data.decode('utf-8', errors='replace'))
+            except OSError:
+                break
+    finally:
+        os.close(master_fd)
+        # Kill child if still running
+        try:
+            os.kill(pid, 15)  # SIGTERM
+            os.waitpid(pid, 0)
+        except ProcessLookupError:
+            pass
+
+    return ''.join(output)
+
+
+def extract_text(full_output):
+    clean = strip_ansi(full_output)
+    lines = clean.split('\n')
     response_lines = []
     found_header = False
-    
+
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
-        # Skip script command header/footer
-        if stripped.startswith('Script started'):
+        if stripped.startswith('Script started') or stripped.startswith('Script done'):
             continue
-        if stripped.startswith('Script done'):
-            break
         if 'COMMAND=' in stripped and 'COMMAND_EXIT_CODE=' not in stripped:
             continue
         if stripped.startswith('COMMAND_EXIT_CODE='):
             continue
-        # Detect model header
-        if '·' in line and any(name in line for name in ['build', 'deepseek', 'nemotron', 'minimax', 'mimo']):
+        if '·' in line and any(name in line for name in ['deepseek', 'nemotron', 'minimax', 'mimo']):
             found_header = True
             continue
         if found_header:
+            if stripped.startswith('>') or stripped.startswith('$'):
+                continue
             response_lines.append(stripped)
-    
-    return '\n'.join(response_lines) if response_lines else clean_output.strip()
 
-
-def run_opencode_via_script(prompt, model, timeout_sec=1800):
-    """Run opencode using the `script` command to get a pseudo-TTY."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-        typescript_file = f.name
-    
-    try:
-        escaped_prompt = prompt.replace('"', '\\"')
-        opencode_cmd = f'opencode run "{escaped_prompt}" --model "{model}" --no-replay'
-
-        result = subprocess.run(
-            ['script', '-q', '-c', opencode_cmd, typescript_file],
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec
-        )
-        
-        with open(typescript_file, 'r', encoding='utf-8', errors='replace') as f:
-            raw_output = f.read()
-        
-        clean_output = strip_ansi(raw_output)
-        assistant_text = extract_assistant_text(clean_output)
-        
-        return assistant_text, result.returncode
-    
-    finally:
-        try:
-            os.unlink(typescript_file)
-        except OSError:
-            pass
+    return '\n'.join(response_lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run opencode with pseudo-TTY and extract text output')
-    parser.add_argument('prompt', help='The prompt to send to opencode')
-    parser.add_argument('--model', required=True, help='The model to use')
-    parser.add_argument('--timeout', type=int, default=1800, help='Timeout in seconds (default: 1800 = 30min)')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--prompt-file', required=True, help='File containing the prompt')
+    parser.add_argument('--model', required=True, help='Model to use')
+    parser.add_argument('--timeout', type=int, default=300, help='Timeout in seconds')
     args = parser.parse_args()
 
-    assistant_text, exit_code = run_opencode_via_script(args.prompt, args.model, args.timeout)
+    with open(args.prompt_file, 'r', encoding='utf-8') as f:
+        prompt = f.read()
 
-    if exit_code != 0:
-        print(f"Error: opencode exited with code {exit_code}", file=sys.stderr)
-        sys.exit(exit_code)
+    full_output = run_opencode(prompt, args.model, args.timeout)
+    text = extract_text(full_output)
 
-    if not assistant_text.strip():
-        print("Error: No assistant text found in output", file=sys.stderr)
+    if not text.strip():
+        print("Error: No assistant text found", file=sys.stderr)
         sys.exit(1)
 
-    print(assistant_text)
+    print(text)
 
 
 if __name__ == '__main__':
     main()
-

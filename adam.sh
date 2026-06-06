@@ -5,26 +5,6 @@
 set -o pipefail
 
 # =====================================================================
-# Helper: invoke opencode with prompt via stdin to avoid argv limits
-# =====================================================================
-invoke_opencode() {
-  local model="$1"
-  local prompt="$2"
-  shift 2
-  local -a files=("$@")
-  
-  # Build file attachment flags
-  local -a file_args=()
-  for f in "${files[@]}"; do
-    file_args+=("--file" "$f")
-  done
-  
-  # Write prompt to stdin via a here-string, then pipe to opencode
-  # Using --no-replay to avoid interactive TUI
-  echo "$prompt" | opencode run --model "$model" --no-replay "${file_args[@]}" 2>&1
-}
-
-# =====================================================================
 # Configuration
 # =====================================================================
 OUTPUT_DIR="${OUTPUT_DIR:-.}"
@@ -95,13 +75,11 @@ fi
 
 cd "$WORKTREE_DIR" || exit 1
 
-# Init Cargo project
 mkdir -p src
 echo -e '[package]\nname = "mined_primitive"\nversion = "0.1.0"\nedition = "2021"' >Cargo.toml
 touch "$TEMP_CODE"
 touch "$ERROR_LOG"
 
-# Copy config into worktree so opencode can find AGENTS.md
 cp /app/AGENTS.md ./AGENTS.md
 cp -r /app/.opencode ./.opencode
 
@@ -128,11 +106,24 @@ INSTRUCTIONS:
 7. Output ONLY the raw specification document. No markdown code wrappers. No preamble. No apologies.
 8. The first line of your output MUST be '---' (the YAML frontmatter opener)."
 
-echo "   [LLM] Generating spec via opencode..."
-GENERATED_SPEC=$(invoke_opencode "$MODEL_NAME" "$SPEC_PROMPT")
+# Write prompt to a temp file and invoke the Python PTY wrapper
+echo "$SPEC_PROMPT" > /tmp/prompt_spec.txt
 
-if [ $? -ne 0 ] || [ -z "$GENERATED_SPEC" ]; then
-  echo "Error: opencode failed to generate a specification or returned empty output."
+echo "   [LLM] Generating spec via opencode..."
+GENERATED_SPEC=$(python3 /app/opencode_wrapper.py --prompt-file /tmp/prompt_spec.txt --model "$MODEL_NAME" --timeout 60)
+spec_exit=$?
+
+if [ "$spec_exit" -ne 0 ]; then
+  echo "   Error: opencode failed (exit $spec_exit)."
+  cd "$ROOT_DIR"
+  git worktree remove --force "$WORKTREE_DIR" &>/dev/null
+  git branch -D "$TEMP_BRANCH" &>/dev/null
+  rm -rf "$OUTPUT_DIR/.adam_worktrees"
+  exit 1
+fi
+
+if [ -z "$GENERATED_SPEC" ]; then
+  echo "   Error: could not extract specification from opencode output."
   cd "$ROOT_DIR"
   git worktree remove --force "$WORKTREE_DIR" &>/dev/null
   git branch -D "$TEMP_BRANCH" &>/dev/null
@@ -143,7 +134,6 @@ fi
 # Strip markdown wrappers
 GENERATED_SPEC=$(echo "$GENERATED_SPEC" | sed -e 's/```yaml//g' -e 's/```markdown//g' -e 's/```//g')
 
-# Save spec
 echo "$GENERATED_SPEC" > "$SPEC_FILE"
 
 echo "   [Spec] Autonomous specification generated and saved to $SPEC_FILE"
@@ -163,25 +153,29 @@ success=false
 while [ $iteration -le $MAX_LOOPS ]; do
   echo "-> Iteration $iteration/$MAX_LOOPS"
 
-  # Short prompt with file attachments for spec/code/errors
-  CODE_PROMPT="You are a stateless Rust code generator. Analyze the attached files (spec.txt, src/lib.rs, compiler_errors.log) and write a complete, compilable Rust library that satisfies the specification and fixes all compiler errors. Output ONLY raw Rust code without apologies or markdown wrappers."
+  # Write prompt to a temp file
+  echo "You are a stateless Rust code generator.
 
-  echo "   [LLM] Querying via opencode with file attachments..."
-  GENERATED_CODE=$(invoke_opencode "$MODEL_NAME" "$CODE_PROMPT" "$SPEC_FILE" "$TEMP_CODE" "$ERROR_LOG")
+Read the specification from ./spec.txt and the compiler errors from ./compiler_errors.log.
 
-  # Save raw response for debugging
-  echo "$GENERATED_CODE" > "debug_response_${iteration}.txt"
+Write a complete, compilable Rust library to ./src/lib.rs that satisfies the specification and fixes all errors.
 
-  if [ $? -ne 0 ] || [ -z "$GENERATED_CODE" ]; then
-    echo "   Error: opencode failed or returned empty code."
-    break
+Use the write tool to create the file. Do not wrap your response in markdown code blocks." > /tmp/prompt_code.txt
+
+  echo "   [LLM] Running opencode with PTY wrapper (5min timeout)..."
+  python3 /app/opencode_wrapper.py --prompt-file /tmp/prompt_code.txt --model "$MODEL_NAME" --timeout 300 > /dev/null 2>&1
+  gen_exit=$?
+
+  if [ "$gen_exit" -ne 0 ]; then
+    echo "   Warning: opencode wrapper exited with code $gen_exit."
   fi
 
-  # Strip markdown wrappers
-  GENERATED_CODE=$(echo "$GENERATED_CODE" | sed -e 's/```rust//g' -e 's/```//g')
-
-  # Tabula Rasa: overwrite the target
-  echo "$GENERATED_CODE" > "$TEMP_CODE"
+  # The model should have used the write tool to create/update src/lib.rs.
+  # Read whatever is there now.
+  if [ ! -s "$TEMP_CODE" ]; then
+    echo "   Error: src/lib.rs is empty after opencode run."
+    break
+  fi
 
   # Sentinel: Compiler Check
   echo "   [Sentinel] Compiling..."
@@ -194,7 +188,7 @@ while [ $iteration -le $MAX_LOOPS ]; do
     break
   else
     echo "   [Sentinel] Failed. Error preview:"
-    head -n 3 "$ERROR_LOG" | sed 's/^/     /'
+    head -n 5 "$ERROR_LOG" | sed 's/^/     /'
   fi
 
   iteration=$((iteration + 1))
@@ -213,11 +207,9 @@ if [ "$success" = true ]; then
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$WORKTREE_DIR/$SPEC_FILE" "$OUTPUT_DIR/spec_$TIMESTAMP.md"
   cp "$WORKTREE_DIR/$TEMP_CODE" "$OUTPUT_DIR/lib_$TIMESTAMP.rs"
-  cp "$WORKTREE_DIR"/debug_response_*.txt "$OUTPUT_DIR/" 2>/dev/null || true
   echo "   Spec:  $OUTPUT_DIR/spec_$TIMESTAMP.md"
   echo "   Code:  $OUTPUT_DIR/lib_$TIMESTAMP.rs"
 
-  # Hash and cache
   VERIFIED_CODE=$(cat "$WORKTREE_DIR/$TEMP_CODE")
   SPEC_RAW=$(cat "$WORKTREE_DIR/$SPEC_FILE")
   HASH=$(python3 -c "
@@ -243,12 +235,10 @@ else
 
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$WORKTREE_DIR/$SPEC_FILE" "$OUTPUT_DIR/spec_failed_$TIMESTAMP.md" 2>/dev/null || true
-  cp "$WORKTREE_DIR"/debug_response_*.txt "$OUTPUT_DIR/" 2>/dev/null || true
   cp "$WORKTREE_DIR/$TEMP_CODE" "$OUTPUT_DIR/lib_failed_$TIMESTAMP.rs" 2>/dev/null || true
   cp "$WORKTREE_DIR/$ERROR_LOG" "$OUTPUT_DIR/errors_$TIMESTAMP.log" 2>/dev/null || true
 fi
 
-# Cleanup
 echo " Cleaning up..."
 git worktree remove --force "$WORKTREE_DIR" &>/dev/null
 git branch -D "$TEMP_BRANCH" &>/dev/null
