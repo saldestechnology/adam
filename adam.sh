@@ -206,6 +206,21 @@ except Exception:
   fi
   echo "  [Analyze] Max complexity: $max_complexity, Symbols: $symbol_count"
 
+  echo "  [Analyze] Generating call graph..."
+  if ! ctx graph --output json > .ctx_graph.json 2> .ctx_graph.err; then
+    echo "  [Analyze] ⚠️  ctx graph JSON failed (proceeding without graph data)."
+  else
+    echo "  [Analyze] Graph JSON generated."
+  fi
+
+  # Also capture Mermaid diagram for visual reference in Qdrant payload
+  if ctx graph --output mermaid > .ctx_graph.mmd 2> /dev/null; then
+    # Strip markdown code fences so the mermaid is stored as raw text
+    sed -i 's/^```mermaid//g; s/^```//g' .ctx_graph.mmd 2>/dev/null || \
+    sed -e 's/^```mermaid//g' -e 's/^```//g' .ctx_graph.mmd > .ctx_graph.mmd.tmp && mv .ctx_graph.mmd.tmp .ctx_graph.mmd
+    echo "  [Analyze] Mermaid diagram captured."
+  fi
+
   # Merge into manifest
   python3 -c "
 import json
@@ -475,6 +490,7 @@ If you need to analyze the current code state, you may use ctx:
     --code src/lib.rs \
     --hash "$AST_HASH" \
     --manifest manifest.json \
+    --work-dir "." \
     --model "$MODEL_NAME" 2>&1; then
     echo "  [Harvest] ✅ Pushed to Qdrant."
   else

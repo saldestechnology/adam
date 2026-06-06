@@ -49,9 +49,90 @@ def compute_spec_embedding(model, spec_text: str):
     return embedding.tolist()
 
 
-def build_payload(hash_val: str, code: str, spec: str, manifest: dict, model_name: str) -> dict:
-    """Build Qdrant point payload."""
-    return {
+def load_ctx_metadata(work_dir: str) -> dict:
+    """Read ctx audit, complexity, and graph JSON files from the work directory."""
+    meta = {}
+    # Audit score
+    audit_path = os.path.join(work_dir, ".ctx_audit.json")
+    if os.path.exists(audit_path):
+        try:
+            with open(audit_path, "r", encoding="utf-8") as f:
+                audit = json.load(f)
+            meta["ctx_audit_score"] = audit.get("overall_score")
+            meta["ctx_audit_passed"] = audit.get("passed")
+            meta["ctx_audit_categories"] = audit.get("categories", [])
+        except Exception:
+            pass
+
+    # Complexity analysis
+    complexity_path = os.path.join(work_dir, ".ctx_complexity.json")
+    if os.path.exists(complexity_path):
+        try:
+            with open(complexity_path, "r", encoding="utf-8") as f:
+                comp = json.load(f)
+            if isinstance(comp, list):
+                meta["ctx_functions"] = comp
+                meta["ctx_symbol_count"] = len(comp)
+                scores = [fn.get("complexity_score", 0) for fn in comp if isinstance(fn, dict)]
+                meta["ctx_max_complexity"] = max(scores) if scores else None
+        except Exception:
+            pass
+
+    # Call graph — enables structural similarity search
+    graph_path = os.path.join(work_dir, ".ctx_graph.json")
+    if os.path.exists(graph_path):
+        try:
+            with open(graph_path, "r", encoding="utf-8") as f:
+                graph = json.load(f)
+            edges = graph.get("edges", [])
+            nodes = graph.get("nodes", [])
+            # Deduplicate nodes by name (ctx graph JSON sometimes has dups)
+            seen = set()
+            unique_nodes = []
+            for n in nodes:
+                name = n.get("name") if isinstance(n, dict) else n
+                if name and name not in seen:
+                    seen.add(name)
+                    unique_nodes.append(n)
+            meta["ctx_graph"] = {
+                "nodes": [n.get("name", str(n)) for n in unique_nodes],
+                "edges": edges,
+            }
+            # Graph metrics for filtering
+            node_count = len(unique_nodes)
+            edge_count = len(edges)
+            meta["ctx_graph_node_count"] = node_count
+            meta["ctx_graph_edge_count"] = edge_count
+            # Edge density = edges / (nodes * (nodes-1)) for directed graph
+            if node_count > 1:
+                meta["ctx_graph_density"] = round(
+                    edge_count / (node_count * (node_count - 1)), 4
+                )
+            else:
+                meta["ctx_graph_density"] = 0.0
+            # Cyclomatic complexity proxy: edges - nodes + 2*connected_components
+            # Simplified: edges - nodes + 2 (assume 1 component for single-file primitives)
+            meta["ctx_graph_cyclomatic_proxy"] = max(1, edge_count - node_count + 2)
+        except Exception:
+            pass
+
+    # Mermaid diagram (for visual reference)
+    mermaid_path = os.path.join(work_dir, ".ctx_graph.mmd")
+    if os.path.exists(mermaid_path):
+        try:
+            with open(mermaid_path, "r", encoding="utf-8") as f:
+                mermaid_text = f.read().strip()
+            if mermaid_text:
+                meta["ctx_graph_mermaid"] = mermaid_text
+        except Exception:
+            pass
+
+    return meta
+
+
+def build_payload(hash_val: str, code: str, spec: str, manifest: dict, model_name: str, ctx_meta: dict) -> dict:
+    """Build Qdrant point payload with flattened ctx metadata."""
+    payload = {
         "ast_hash": hash_val,
         "code": code,
         "spec": spec,
@@ -62,6 +143,9 @@ def build_payload(hash_val: str, code: str, spec: str, manifest: dict, model_nam
         "category": extract_frontmatter_field(spec, "category"),
         "complexity": extract_frontmatter_field(spec, "complexity"),
     }
+    # Flatten ctx metadata for direct Qdrant filtering
+    payload.update(ctx_meta)
+    return payload
 
 
 def extract_frontmatter_field(spec_text: str, key: str) -> str:
@@ -106,6 +190,7 @@ def main():
     parser.add_argument("--code", required=True, help="Path to src/lib.rs")
     parser.add_argument("--hash", required=True, help="AST content hash")
     parser.add_argument("--manifest", required=True, help="Path to sentinel manifest JSON")
+    parser.add_argument("--work-dir", default=".", help="Working directory where ctx .json files live")
     parser.add_argument("--model", default="unknown", help="LLM model name")
     args = parser.parse_args()
 
@@ -115,6 +200,9 @@ def main():
         code_text = f.read()
     with open(args.manifest, "r", encoding="utf-8") as f:
         manifest = json.load(f)
+
+    # Load ctx metadata
+    ctx_meta = load_ctx_metadata(args.work_dir)
 
     # Connect to Qdrant
     client = QdrantClient(url=QDRANT_URL)
@@ -127,7 +215,7 @@ def main():
     vector = compute_spec_embedding(model, spec_text)
 
     # Build payload and deterministic point ID (Qdrant requires UUID format for string IDs)
-    payload = build_payload(args.hash, code_text, spec_text, manifest, args.model)
+    payload = build_payload(args.hash, code_text, spec_text, manifest, args.model, ctx_meta)
     point_id = str(uuid.uuid5(uuid.NAMESPACE_OID, args.hash))
 
     # Push
