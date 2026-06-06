@@ -51,26 +51,22 @@ def extract_assistant_text(clean_output):
     return '\n'.join(response_lines) if response_lines else clean_output.strip()
 
 
-def run_opencode_via_script(prompt, model):
+def run_opencode_via_script(prompt, model, timeout_sec=1800):
     """Run opencode using the `script` command to get a pseudo-TTY."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
         typescript_file = f.name
     
     try:
-        # Build the command that script will execute
-        # Escape the prompt for shell safety
         escaped_prompt = prompt.replace('"', '\\"')
         opencode_cmd = f'opencode run "{escaped_prompt}" --model "{model}" --no-replay'
 
-        # Run via script to get a pseudo-TTY
         result = subprocess.run(
             ['script', '-q', '-c', opencode_cmd, typescript_file],
             capture_output=True,
             text=True,
-            timeout=1800
+            timeout=timeout_sec
         )
         
-        # Read the typescript file
         with open(typescript_file, 'r', encoding='utf-8', errors='replace') as f:
             raw_output = f.read()
         
@@ -90,9 +86,10 @@ def main():
     parser = argparse.ArgumentParser(description='Run opencode with pseudo-TTY and extract text output')
     parser.add_argument('prompt', help='The prompt to send to opencode')
     parser.add_argument('--model', required=True, help='The model to use')
+    parser.add_argument('--timeout', type=int, default=1800, help='Timeout in seconds (default: 1800 = 30min)')
     args = parser.parse_args()
 
-    assistant_text, exit_code = run_opencode_via_script(args.prompt, args.model)
+    assistant_text, exit_code = run_opencode_via_script(args.prompt, args.model, args.timeout)
 
     if exit_code != 0:
         print(f"Error: opencode exited with code {exit_code}", file=sys.stderr)
@@ -107,3 +104,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

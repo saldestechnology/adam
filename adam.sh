@@ -5,12 +5,23 @@
 set -o pipefail
 
 # =====================================================================
-# Helper: invoke opencode
+# Helper: invoke opencode with prompt via stdin to avoid argv limits
 # =====================================================================
 invoke_opencode() {
-  local prompt="$1"
-  local model="$2"
-  opencode run "$prompt" --model "$model" --no-replay 2>&1
+  local model="$1"
+  local prompt="$2"
+  shift 2
+  local -a files=("$@")
+  
+  # Build file attachment flags
+  local -a file_args=()
+  for f in "${files[@]}"; do
+    file_args+=("--file" "$f")
+  done
+  
+  # Write prompt to stdin via a here-string, then pipe to opencode
+  # Using --no-replay to avoid interactive TUI
+  echo "$prompt" | opencode run --model "$model" --no-replay "${file_args[@]}" 2>&1
 }
 
 # =====================================================================
@@ -20,9 +31,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-.}"
 SPEC_FILE="spec.txt"
 CACHE_DB="$OUTPUT_DIR/compiled_cache.json"
 MAX_LOOPS=15
-MODEL_NAME="opencode/deepseek-v4-flash-free" # Or any open-source model of your choice supported by opencode
+MODEL_NAME="opencode/deepseek-v4-flash-free"
 
-# Autonomous task categories (will be shuffled randomly before each run)
 CATEGORIES=(
   "algorithms"
   "data_structures"
@@ -36,29 +46,28 @@ CATEGORIES=(
   "memory_management"
 )
 
-# Save the root directory so we can always navigate back safely
 ROOT_DIR="$(pwd)"
 
 # =====================================================================
 # 1. Core Sanity Checks
 # =====================================================================
 if ! command -v rustc &>/dev/null; then
-  echo "Error: 'rustc' compiler is not installed or not in PATH."
+  echo "Error: 'rustc' not in PATH."
   exit 1
 fi
 
 if ! command -v git &>/dev/null; then
-  echo "Error: 'git' is required to manage worktrees."
+  echo "Error: 'git' required for worktrees."
   exit 1
 fi
 
 if ! command -v opencode &>/dev/null; then
-  echo "Error: 'opencode' utility is not installed or not in PATH."
+  echo "Error: 'opencode' not in PATH."
   exit 1
 fi
 
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "Error: Must run inside a Git repository to use worktrees."
+  echo "Error: Must run inside a Git repo."
   exit 1
 fi
 
@@ -72,14 +81,11 @@ TEMP_CODE="src/lib.rs"
 ERROR_LOG="compiler_errors.log"
 
 echo "======================================================"
-echo " adam: Initializing Git Worktree Environment "
+echo " adam: Initializing Git Worktree Environment"
 echo "======================================================"
 echo " Creating isolated worktree at: $WORKTREE_DIR"
 
-# Ensure clean setup of the worktree directory
 mkdir -p "$OUTPUT_DIR/.adam_worktrees"
-
-# Create a new, isolated orphan branch and check it out in a new worktree
 git worktree add -b "$TEMP_BRANCH" "$WORKTREE_DIR" &>/dev/null
 
 if [ $? -ne 0 ]; then
@@ -87,16 +93,15 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# Move into the worktree
 cd "$WORKTREE_DIR" || exit 1
 
-# Initialize a minimal Cargo structure inside the worktree
+# Init Cargo project
 mkdir -p src
 echo -e '[package]\nname = "mined_primitive"\nversion = "0.1.0"\nedition = "2021"' >Cargo.toml
 touch "$TEMP_CODE"
 touch "$ERROR_LOG"
 
-# Copy the system prompt and opencode config into the worktree so opencode can find them
+# Copy config into worktree so opencode can find AGENTS.md
 cp /app/AGENTS.md ./AGENTS.md
 cp -r /app/.opencode ./.opencode
 
@@ -104,13 +109,11 @@ cp -r /app/.opencode ./.opencode
 # 3. Phase 1 — Autonomous Spec Crystallization
 # =====================================================================
 echo "======================================================"
-echo " Phase 1: Autonomous Spec Crystallization "
+echo " Phase 1: Autonomous Spec Crystallization"
 echo "======================================================"
 
-# Shuffle the category list randomly using sort -R
 SHUFFLED_CATEGORIES=$(printf '%s\n' "${CATEGORIES[@]}" | sort -R | tr '\n' ', ' | sed 's/, $//')
 
-# Construct the explicit autonomous spec-generation prompt
 SPEC_PROMPT="You are the Autonomous Rust Specification Crystallization Engine.
 
 Your task is to invent a completely new, open-ended Rust library primitive and crystallize it into a formal specification.
@@ -125,7 +128,8 @@ INSTRUCTIONS:
 7. Output ONLY the raw specification document. No markdown code wrappers. No preamble. No apologies.
 8. The first line of your output MUST be '---' (the YAML frontmatter opener)."
 
-GENERATED_SPEC=$(invoke_opencode "$SPEC_PROMPT" "$MODEL_NAME")
+echo "   [LLM] Generating spec via opencode..."
+GENERATED_SPEC=$(invoke_opencode "$MODEL_NAME" "$SPEC_PROMPT")
 
 if [ $? -ne 0 ] || [ -z "$GENERATED_SPEC" ]; then
   echo "Error: opencode failed to generate a specification or returned empty output."
@@ -136,11 +140,11 @@ if [ $? -ne 0 ] || [ -z "$GENERATED_SPEC" ]; then
   exit 1
 fi
 
-# Clean up any potential markdown wrappers if the model still generated them
+# Strip markdown wrappers
 GENERATED_SPEC=$(echo "$GENERATED_SPEC" | sed -e 's/```yaml//g' -e 's/```markdown//g' -e 's/```//g')
 
-# Save the generated specification
-echo "$GENERATED_SPEC" >"$SPEC_FILE"
+# Save spec
+echo "$GENERATED_SPEC" > "$SPEC_FILE"
 
 echo "   [Spec] Autonomous specification generated and saved to $SPEC_FILE"
 echo "   [Spec] Content preview (first 5 lines):"
@@ -150,7 +154,7 @@ head -n 5 "$SPEC_FILE" | sed 's/^/      /'
 # 4. Phase 2 — The Pure Bash Ralph Loop
 # =====================================================================
 echo "======================================================"
-echo " Phase 2: The Ralph Loop (Compiler Sentinel) "
+echo " Phase 2: The Ralph Loop (Compiler Sentinel)"
 echo "======================================================"
 
 iteration=1
@@ -159,33 +163,29 @@ success=false
 while [ $iteration -le $MAX_LOOPS ]; do
   echo "-> Iteration $iteration/$MAX_LOOPS"
 
-  # Read current state safely in Bash
-  SPEC_CONTENT=$(cat "$SPEC_FILE")
-  LAST_CODE=$(cat "$TEMP_CODE")
-  LAST_ERROR=$(cat "$ERROR_LOG")
+  # Short prompt with file attachments for spec/code/errors
+  CODE_PROMPT="You are a stateless Rust code generator. Analyze the attached files (spec.txt, src/lib.rs, compiler_errors.log) and write a complete, compilable Rust library that satisfies the specification and fixes all compiler errors. Output ONLY raw Rust code without apologies or markdown wrappers."
 
-  # Construct a short prompt that instructs the model to read files directly.
-  # This avoids the "Argument list too long" error and leverages opencode's file tools.
-  CODE_PROMPT="You are a stateless Rust code generator. Read the specification from ./spec.txt, the previous code from ./src/lib.rs, and the compiler errors from ./compiler_errors.log. Write a complete, compilable Rust library in ./src/lib.rs that satisfies the specification and fixes all errors. Output ONLY raw Rust code without apologies or markdown wrappers."
+  echo "   [LLM] Querying via opencode with file attachments..."
+  GENERATED_CODE=$(invoke_opencode "$MODEL_NAME" "$CODE_PROMPT" "$SPEC_FILE" "$TEMP_CODE" "$ERROR_LOG")
 
-  # Invoke local Open-Source model directly via opencode CLI
-  echo "   [LLM] Querying via opencode using $MODEL_NAME..."
-  GENERATED_CODE=$(invoke_opencode "$CODE_PROMPT" "$MODEL_NAME")
+  # Save raw response for debugging
+  echo "$GENERATED_CODE" > "debug_response_${iteration}.txt"
 
   if [ $? -ne 0 ] || [ -z "$GENERATED_CODE" ]; then
-    echo "Error: opencode failed to run or returned empty code."
+    echo "   Error: opencode failed or returned empty code."
     break
   fi
 
-  # Clean up any potential markdown wrappers if the model still generated them
+  # Strip markdown wrappers
   GENERATED_CODE=$(echo "$GENERATED_CODE" | sed -e 's/```rust//g' -e 's/```//g')
 
-  # Overwrite the worktree target (Tabula Rasa step)
-  echo "$GENERATED_CODE" >"$TEMP_CODE"
+  # Tabula Rasa: overwrite the target
+  echo "$GENERATED_CODE" > "$TEMP_CODE"
 
-  # Sentinel: Compiler Check inside the Worktree
-  echo "   [Sentinel] Compiling inside isolated worktree..."
-  cargo check &>"$ERROR_LOG"
+  # Sentinel: Compiler Check
+  echo "   [Sentinel] Compiling..."
+  cargo check &> "$ERROR_LOG"
   compile_status=$?
 
   if [ $compile_status -eq 0 ]; then
@@ -193,7 +193,8 @@ while [ $iteration -le $MAX_LOOPS ]; do
     success=true
     break
   else
-    echo "   [Sentinel] Failed. Error recorded."
+    echo "   [Sentinel] Failed. Error preview:"
+    head -n 3 "$ERROR_LOG" | sed 's/^/     /'
   fi
 
   iteration=$((iteration + 1))
@@ -201,58 +202,54 @@ while [ $iteration -le $MAX_LOOPS ]; do
 done
 
 # =====================================================================
-# 5. Phase 3 — Harvesting, Artifact Persistence, and Worktree Teardown
+# 5. Phase 3 — Harvesting & Teardown
 # =====================================================================
-cd "$ROOT_DIR" # Move back to root directory
+cd "$ROOT_DIR"
 
 if [ "$success" = true ]; then
   echo "======================================================"
   echo " SUCCESS: Primitive verified successfully."
 
-  # Persist artifacts to OUTPUT_DIR for human inspection
-  echo " Persisting artifacts to $OUTPUT_DIR..."
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$WORKTREE_DIR/$SPEC_FILE" "$OUTPUT_DIR/spec_$TIMESTAMP.md"
   cp "$WORKTREE_DIR/$TEMP_CODE" "$OUTPUT_DIR/lib_$TIMESTAMP.rs"
-  echo "   Spec saved as: $OUTPUT_DIR/spec_$TIMESTAMP.md"
-  echo "   Code saved as: $OUTPUT_DIR/lib_$TIMESTAMP.rs"
+  cp "$WORKTREE_DIR"/debug_response_*.txt "$OUTPUT_DIR/" 2>/dev/null || true
+  echo "   Spec:  $OUTPUT_DIR/spec_$TIMESTAMP.md"
+  echo "   Code:  $OUTPUT_DIR/lib_$TIMESTAMP.rs"
 
-  # Store the verified code into our JSON database
-  VERIFIED_CODE_CONTENT=$(cat "$WORKTREE_DIR/$TEMP_CODE")
-  SPEC_CONTENT_RAW=$(cat "$WORKTREE_DIR/$SPEC_FILE")
-
+  # Hash and cache
+  VERIFIED_CODE=$(cat "$WORKTREE_DIR/$TEMP_CODE")
+  SPEC_RAW=$(cat "$WORKTREE_DIR/$SPEC_FILE")
   HASH=$(python3 -c "
 import json, hashlib, os
-code = '''$VERIFIED_CODE_CONTENT'''
-spec = '''$SPEC_CONTENT_RAW'''
+code = '''$VERIFIED_CODE'''
+spec = '''$SPEC_RAW'''
 normalized = '\n'.join([l.strip() for l in code.splitlines() if l.strip() and not l.strip().startswith('//')])
 sha = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
-
 db = {}
 if os.path.exists('$CACHE_DB'):
     try:
         with open('$CACHE_DB', 'r') as f: db = json.load(f)
     except: pass
-
 db[sha] = {'code': code, 'spec': spec, 'sentinel': 'rustc_worktree'}
 with open('$CACHE_DB', 'w') as f: json.dump(db, f, indent=2)
 print(sha)
 ")
-
-  echo " Unique Content-Address: $HASH"
-  echo " Saved safely in: $CACHE_DB"
+  echo "   Hash:  $HASH"
+  echo "   Cache: $CACHE_DB"
 else
   echo "======================================================"
-  echo " FAILURE: Loop exceeded max iterations without compiling."
+  echo " FAILURE: Loop exceeded max iterations."
 
-  # Even on failure, persist the spec for debugging
-  echo " Persisting failed spec to $OUTPUT_DIR for inspection..."
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$WORKTREE_DIR/$SPEC_FILE" "$OUTPUT_DIR/spec_failed_$TIMESTAMP.md" 2>/dev/null || true
+  cp "$WORKTREE_DIR"/debug_response_*.txt "$OUTPUT_DIR/" 2>/dev/null || true
+  cp "$WORKTREE_DIR/$TEMP_CODE" "$OUTPUT_DIR/lib_failed_$TIMESTAMP.rs" 2>/dev/null || true
+  cp "$WORKTREE_DIR/$ERROR_LOG" "$OUTPUT_DIR/errors_$TIMESTAMP.log" 2>/dev/null || true
 fi
 
-# ALWAYS clean up worktrees and branches to leave a zero-footprint workspace
-echo " Cleaning up temporary worktree and branches..."
+# Cleanup
+echo " Cleaning up..."
 git worktree remove --force "$WORKTREE_DIR" &>/dev/null
 git branch -D "$TEMP_BRANCH" &>/dev/null
 rm -rf "$OUTPUT_DIR/.adam_worktrees"
