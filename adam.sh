@@ -6,15 +6,14 @@ set -o pipefail
 
 # =====================================================================
 # Helper: run opencode and capture text output (for Phase 1)
-# Uses --format json to get machine-readable output, then extracts
-# text content. Requires Docker -t flag for TTY.
+# Uses --format json for machine-readable text extraction.
+# --dangerously-skip-permissions not needed here (read-only).
 # =====================================================================
 invoke_opencode_text() {
   local model="$1"
   local prompt="$2"
   local timeout_sec="${3:-300}"
 
-  # Run opencode with JSON format, capture all JSON events
   timeout "$timeout_sec" \
     opencode run "$prompt" --model "$model" --format json 2>&1 | \
     python3 -c "
@@ -40,27 +39,20 @@ sys.stdout.write(result)
 }
 
 # =====================================================================
-# Helper: run opencode inside script(1) to enable tool access (for Phase 2)
-# The model uses its write/read tools. We do NOT capture text output;
-# instead we read the file the model wrote after it finishes.
+# Helper: run opencode with full tool access (for Phase 2)
+# --dangerously-skip-permissions auto-approves all tool calls,
+# enabling the model to write src/lib.rs without interactive confirmation.
 # =====================================================================
 invoke_opencode_tools() {
   local model="$1"
   local prompt="$2"
   local timeout_sec="${3:-300}"
-  local typescript="/tmp/opencode_tty_$$.txt"
 
-  # Escape quotes for shell safety
-  local escaped="${prompt//\"/\\\"}"
-
-  # Run opencode inside a script pseudo-TTY (enables tool access)
   timeout "$timeout_sec" \
-    script -q -c "opencode run \"$escaped\" --model \"$model\"" "$typescript" \
+    opencode run "$prompt" --model "$model" --dangerously-skip-permissions \
     > /dev/null 2>&1
 
-  local exit_code=$?
-  rm -f "$typescript" 2>/dev/null
-  return $exit_code
+  return $?
 }
 
 # =====================================================================
