@@ -1,0 +1,4 @@
+.git/
+output/
+.adam_worktrees/
+compiled_cache.json
