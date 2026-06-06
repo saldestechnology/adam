@@ -90,14 +90,56 @@ Defines the test suite that the compiler sentinel will use to verify correctness
 
 Tests MUST be written as declarative descriptions, not as executable Rust code. The Ralph Loop will translate them into actual `#[test]` functions.
 
-## Creativity Directive
+## Platonic Primitive Directive
 
-Do not generate trivial primitives. Aim for depth:
+Your purpose is to generate **atomic, single-purpose primitives** — the irreducible Platonic shapes of software. These are building blocks that can be composed into larger solutions, not monolithic systems that try to solve everything at once.
 
-- Prefer data structures with non-trivial invariants (e.g., a self-balancing tree over a simple vector).
-- Prefer algorithms with interesting trade-offs (e.g., a randomized skip list over a plain linked list).
-- Prefer concurrency primitives that exercise Rust's ownership model (e.g., a lock-free queue over a mutex-protected vector).
-- Combine domains when possible (e.g., a concurrent LRU cache, a persistent data structure with structural sharing).
+### What is a Platonic Primitive?
+
+A Platonic primitive is:
+- **Single-purpose**: One concept, one data structure, one algorithmic idea.
+- **Composable**: A consumer can combine it with other primitives to build complexity, rather than the primitive itself being complex.
+- **Low dependency**: Ideally zero external crates; self-contained in std.
+- **Deterministic**: Clear, predictable behavior with minimal hidden state.
+- **Small surface area**: A handful of types and methods, not a sprawling API.
+
+### Bias Toward Simplicity
+
+- **Low complexity MUST be the default**. Only generate `medium` or `high` complexity when the category strictly demands it (e.g., lock-free concurrency).
+- **Complexity distribution target**: ~60% low, ~30% medium, ~10% high.
+- A simple, well-specified primitive is MORE valuable than a clever, over-engineered one.
+- If you find yourself adding "and also handles X" or "with automatic Y optimization," you are building composite monsters, not Platonic shapes. **Stop and simplify.**
+
+### Examples of Platonic Primitives (GOOD)
+
+| Category | Primitive | Why Platonic |
+|----------|-----------|--------------|
+| data_structure | `SparseVec<T>` — a vector indexed by `usize` that skips empty slots without allocating for them | Single concept: sparse indexing. Composes into grids, matrices, maps. |
+| algorithm | `BoyerMooreSearcher` — a pre-processed pattern for fast substring search | Single concept: pattern preprocessing. Used by text editors, parsers. |
+| string_utility | `LevenshteinDistance` — compute edit distance between two strings | Single concept: edit distance. Composes into diff tools, fuzzy matchers. |
+| math_utility | `RationalNumber` — exact arithmetic with numerator/denominator | Single concept: fractional math. No floats, no surprises. |
+| design_pattern | `TypeMap` — a heterogeneous map keyed by types, not values | Single concept: type-level indexing. Composes into DI containers, config systems. |
+| concurrency_primitive | `TicketLock` — FIFO fair spinlock with atomic ticket counter | Single concept: fair ordering. Simple enough to verify, useful enough to reuse. |
+| error_handling | `ValidationChain<T>` — compose validators that short-circuit on failure | Single concept: composable validation. Each validator is a pure function. |
+| memory_management | `BumpAllocator` — arena allocator that only advances a pointer, never frees | Single concept: linear allocation. Used in compilers, game frames. |
+
+### Examples of Composite Monsters (AVOID)
+
+| Bad Idea | Why |
+|----------|-----|
+| "A persistent concurrent LRU cache with automatic compression and probabilistic eviction" | Combining persistence + concurrency + caching + compression. Each is its own primitive. |
+| "A generic graph database with ACID transactions and a built-in query planner" | Not a primitive; it's an entire product. |
+| "A lock-free work-stealing deque with priority scheduling, NUMA awareness, and batching" | Too many concepts smushed together. `WorkStealingDeque` is Platonic; this is not. |
+| "A self-balancing B+ tree with range queries, bulk loading, and write-ahead logging" | A B+ tree is Platonic. Adding logging and bulk loading makes it a system. |
+
+### Simplification Rule
+
+Before emitting the spec, ask yourself:
+1. Can a user understand this primitive in 30 seconds?
+2. Does it solve exactly ONE problem?
+3. Can it be used as a building block in 3+ different applications?
+
+If any answer is "no," strip features until all are "yes."
 
 ## Final Output Rule
 

@@ -229,16 +229,18 @@ while :; do
   SHUFFLED_CATEGORIES=$(printf '%s\n' "${CATEGORIES[@]}" | sort -R | tr '\n' ', ' | sed 's/, $//')
 
   SPEC_PROMPT="You are the Autonomous Rust Specification Crystallization Engine.
-Your task is to invent a completely new, open-ended Rust library primitive and crystallize it into a formal specification.
-INSTRUCTIONS:
+Your task is to invent a completely new Rust library primitive and crystallize it into a formal specification.
+CRITICAL INSTRUCTIONS:
 1. Pick ONE category at random from: $SHUFFLED_CATEGORIES
-2. Within that category, invent a specific, non-trivial primitive. Be creative and architecturally sound.
-3. Generate a complete specification document conforming to AGENTS.md format.
-4. The specification MUST use RFC 2119 key words for all requirements.
-5. The specification MUST include YAML frontmatter with keys: intent, category, complexity, rfc2119_level.
-6. The specification MUST contain these three sections in order: Structural Contract, Behavioral Contract, Conformance Tests.
-7. Output ONLY the raw specification document. No markdown wrappers. No preamble. No apologies.
-8. The first line of your output MUST be '---'."
+2. Within that category, invent a specific, atomic, single-purpose primitive. Think building blocks, not monoliths.
+3. Default to 'low' complexity. The primitive should be understandable in 30 seconds and solve exactly ONE problem.
+4. Only use 'medium' or 'high' complexity when the category strictly demands it (e.g., lock-free concurrency).
+5. Generate a complete specification document conforming to AGENTS.md format.
+6. The specification MUST use RFC 2119 key words for all requirements.
+7. The specification MUST include YAML frontmatter with keys: intent, category, complexity, rfc2119_level.
+8. The specification MUST contain these three sections in order: Structural Contract, Behavioral Contract, Conformance Tests.
+9. Output ONLY the raw specification document. No markdown wrappers. No preamble. No apologies.
+10. The first line of your output MUST be '---'."
 
   GENERATED_SPEC=$(invoke_opencode_text "$MODEL_NAME" "$SPEC_PROMPT" 120)
   spec_exit=$?
