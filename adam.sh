@@ -5,6 +5,15 @@
 set -o pipefail
 
 # =====================================================================
+# Helper: invoke opencode
+# =====================================================================
+invoke_opencode() {
+  local prompt="$1"
+  local model="$2"
+  opencode run "$prompt" --model "$model" --no-replay 2>&1
+}
+
+# =====================================================================
 # Configuration
 # =====================================================================
 OUTPUT_DIR="${OUTPUT_DIR:-.}"
@@ -116,8 +125,7 @@ INSTRUCTIONS:
 7. Output ONLY the raw specification document. No markdown code wrappers. No preamble. No apologies.
 8. The first line of your output MUST be '---' (the YAML frontmatter opener)."
 
-echo "   [LLM] Generating autonomous specification via opencode using $MODEL_NAME..."
-GENERATED_SPEC=$(opencode run "$SPEC_PROMPT" --model "$MODEL_NAME")
+GENERATED_SPEC=$(invoke_opencode "$SPEC_PROMPT" "$MODEL_NAME")
 
 if [ $? -ne 0 ] || [ -z "$GENERATED_SPEC" ]; then
   echo "Error: opencode failed to generate a specification or returned empty output."
@@ -156,21 +164,13 @@ while [ $iteration -le $MAX_LOOPS ]; do
   LAST_CODE=$(cat "$TEMP_CODE")
   LAST_ERROR=$(cat "$ERROR_LOG")
 
-  # Construct the stateless prompt
-  CODE_PROMPT="You are a stateless Rust code generator. Write a library function for this specification:
-$SPEC_CONTENT
-
-PREVIOUS CODE:
-$LAST_CODE
-
-COMPILER ERROR:
-$LAST_ERROR
-
-Output ONLY raw Rust code without apologies or markdown wrappers."
+  # Construct a short prompt that instructs the model to read files directly.
+  # This avoids the "Argument list too long" error and leverages opencode's file tools.
+  CODE_PROMPT="You are a stateless Rust code generator. Read the specification from ./spec.txt, the previous code from ./src/lib.rs, and the compiler errors from ./compiler_errors.log. Write a complete, compilable Rust library in ./src/lib.rs that satisfies the specification and fixes all errors. Output ONLY raw Rust code without apologies or markdown wrappers."
 
   # Invoke local Open-Source model directly via opencode CLI
   echo "   [LLM] Querying via opencode using $MODEL_NAME..."
-  GENERATED_CODE=$(opencode run "$CODE_PROMPT" --model "$MODEL_NAME")
+  GENERATED_CODE=$(invoke_opencode "$CODE_PROMPT" "$MODEL_NAME")
 
   if [ $? -ne 0 ] || [ -z "$GENERATED_CODE" ]; then
     echo "Error: opencode failed to run or returned empty code."

@@ -23,6 +23,9 @@ RUN git init && git config user.email "adam@docker.local" && git config user.nam
 COPY adam.sh /app/adam.sh
 RUN chmod +x /app/adam.sh
 
+# Copy the opencode TTY wrapper
+COPY opencode_wrapper.py /app/opencode_wrapper.py
+
 # Copy the system prompt (renamed from SYSTEM.md to AGENTS.md inside the container)
 COPY SYSTEM.md /app/AGENTS.md
 
