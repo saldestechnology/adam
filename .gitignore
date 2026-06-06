@@ -1,3 +1,7 @@
 output/
 AGENTS.md
 output*/
+
+# Rust build artifacts
+harvest/target/
+*.lock
