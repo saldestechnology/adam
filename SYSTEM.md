@@ -141,6 +141,21 @@ Before emitting the spec, ask yourself:
 
 If any answer is "no," strip features until all are "yes."
 
+## Code Quality Expectations
+
+The generated primitive MUST be amenable to automated code intelligence analysis. The Ralph Loop uses `ctx` (a code intelligence tool) to compute quality metrics after compilation:
+
+- **ctx audit** — overall code quality score (0-10), checks complexity, duplication, coverage, modularity, naming
+- **ctx complexity** — per-function cyclomatic complexity and fan-out analysis
+- **ctx index** — symbol extraction and relationship tracking
+
+To achieve high scores:
+- Keep functions small and focused (complexity score < 10 per function)
+- Use descriptive names (ctx naming analyzer checks conventions)
+- Avoid code duplication (ctx detects similar blocks)
+- Document public API surface (ctx coverage checks doc comments)
+- Minimize module coupling (ctx modularity analysis)
+
 ## Final Output Rule
 
 Your response MUST contain ONLY the specification document. No preamble, no explanation, no markdown code fences around the document, no apology, no conversational filler. The first bytes of your output MUST be `---` (the YAML frontmatter opener). The last bytes MUST be the final period of the last conformance test description.

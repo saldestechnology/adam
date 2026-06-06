@@ -136,27 +136,25 @@ MANIFEST
 }
 
 # =====================================================================
-# Helper: enrich manifest with ctx quality scores
+# Helper: enrich manifest with ctx quality scores (MANDATORY)
+# Returns non-zero if any ctx step fails → harvest is aborted.
 # =====================================================================
 enrich_manifest_with_ctx() {
-  if ! command -v ctx >/dev/null 2>&1; then
-    echo "  [Analyze] ctx not available, skipping quality analysis."
-    return
-  fi
-
   echo "  [Analyze] Indexing codebase with ctx..."
-  if ctx index > .ctx_index.log 2>&1; then
-    echo "  [Analyze] Index complete."
-  else
-    echo "  [Analyze] ctx index failed (likely non-Rust or unsupported). Skipping."
-    return
+  if ! ctx index > .ctx_index.log 2>&1; then
+    echo "  [Analyze] ❌ ctx index failed. Artifact rejected."
+    return 1
   fi
+  echo "  [Analyze] Index complete."
 
   echo "  [Analyze] Running audit..."
   local audit_score="null"
-  if ctx audit --output json > .ctx_audit.json 2> .ctx_audit.err; then
-    audit_score=$(python3 -c "
-import json, sys
+  if ! ctx audit --output json > .ctx_audit.json 2> .ctx_audit.err; then
+    echo "  [Analyze] ❌ ctx audit failed. Artifact rejected."
+    return 1
+  fi
+  audit_score=$(python3 -c "
+import json
 try:
     with open('.ctx_audit.json') as f:
         data = json.load(f)
@@ -164,7 +162,6 @@ try:
 except Exception:
     print('null')
 " 2>/dev/null)
-  fi
   if [ -z "$audit_score" ] || [ "$audit_score" = "null" ]; then
     audit_score="null"
   fi
@@ -173,9 +170,12 @@ except Exception:
   echo "  [Analyze] Running complexity analysis..."
   local max_complexity="null"
   local symbol_count="null"
-  if ctx complexity --output json > .ctx_complexity.json 2> .ctx_complexity.err; then
-    max_complexity=$(python3 -c "
-import json, sys
+  if ! ctx complexity --output json > .ctx_complexity.json 2> .ctx_complexity.err; then
+    echo "  [Analyze] ❌ ctx complexity failed. Artifact rejected."
+    return 1
+  fi
+  max_complexity=$(python3 -c "
+import json
 try:
     with open('.ctx_complexity.json') as f:
         data = json.load(f)
@@ -188,8 +188,8 @@ except Exception:
     print('null')
 " 2>/dev/null)
 
-    symbol_count=$(python3 -c "
-import json, sys
+  symbol_count=$(python3 -c "
+import json
 try:
     with open('.ctx_complexity.json') as f:
         data = json.load(f)
@@ -197,7 +197,7 @@ try:
 except Exception:
     print('null')
 " 2>/dev/null)
-  fi
+
   if [ -z "$max_complexity" ] || [ "$max_complexity" = "null" ]; then
     max_complexity="null"
   fi
@@ -220,9 +220,8 @@ with open('manifest.json', 'w') as f:
     json.dump(manifest, f, indent=2)
 " 2>/dev/null
 
-  echo "  [Analyze] Manifest enriched with ctx quality metrics."
-}
-MANIFEST
+  echo "  [Analyze] ✅ Manifest enriched with ctx quality metrics."
+  return 0
 }
 
 # =====================================================================
@@ -251,10 +250,10 @@ command -v harvest >/dev/null || {
   echo "Error: harvest not in PATH."
   exit 1
 }
-# ctx is optional but nice to have
-if command -v ctx >/dev/null; then
-  echo "[Sanity] ctx (code intelligence) available."
-fi
+command -v ctx >/dev/null || {
+  echo "Error: ctx (code intelligence) not in PATH."
+  exit 1
+}
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Error: Must run inside a Git repo."
@@ -378,10 +377,19 @@ CRITICAL INSTRUCTIONS:
   while [ $loop_iter -le $MAX_LOOPS ]; do
     echo "  -> Ralph iteration $loop_iter/$MAX_LOOPS"
 
-    CODE_PROMPT="You are a stateless Rust code generator.
+    CODE_PROMPT="You are a stateless Rust code generator with access to the ctx code intelligence tool.
+
 Read the specification from ./spec.txt and the compiler errors from ./compiler_errors.log.
+
 Write a complete, compilable Rust library to ./src/lib.rs that satisfies the specification and fixes all errors.
-Use the write tool to create the file. Do not wrap your response in markdown code blocks."
+
+Use the write tool to create the file. Do not wrap your response in markdown code blocks.
+
+If you need to analyze the current code state, you may use ctx:
+  ctx index                    # Index the codebase for symbol analysis
+  ctx complexity --output json # Check if any function is too complex
+  ctx explain <symbol>        # Understand a symbol's relationships
+  ctx query stats              # See codebase statistics"
 
     invoke_opencode_tools "$MODEL_NAME" "$CODE_PROMPT" 300
     gen_exit=$?
@@ -446,8 +454,16 @@ Use the write tool to create the file. Do not wrap your response in markdown cod
   build_manifest "$AST_HASH"
   echo "  [Harvest] Manifest built."
   
-  # 4c. Code Quality Analysis (ctx)
-  enrich_manifest_with_ctx
+  # 4c. Code Quality Analysis (ctx) — MANDATORY gate
+  if ! enrich_manifest_with_ctx; then
+    echo "[Harvest] ❌ Code quality analysis failed. Artifact rejected."
+    cd "$ROOT_DIR"
+    git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
+    git branch -D "$TEMP_BRANCH" >/dev/null 2>&1
+    rm -rf "$OUTPUT_DIR/.adam_worktrees"
+    sleep 5
+    continue
+  fi
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$SPEC_FILE" "$OUTPUT_DIR/spec_$TIMESTAMP.md"
   cp src/lib.rs "$OUTPUT_DIR/lib_$TIMESTAMP.rs"
