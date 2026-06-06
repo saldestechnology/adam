@@ -2,30 +2,35 @@
 # Makefile for Docker Compose operations
 #
 # Usage:
-#   make up     → Build image and start Qdrant + miner (daemon mode)
-#   make down   → Stop all services
-#   make logs   → Stream miner logs
-#   make db     → Open Qdrant dashboard in browser
-#   make artifacts → List generated specs and cache
-#   make clean  → Stop services and delete all output
+#   make up       → Build image and start Qdrant + miner (daemon mode)
+#   make down     → Stop all services
+#   make logs     → Stream miner logs
+#   make db       → Open Qdrant dashboard in browser
+#   make query    → Query Qdrant collection count
+#   make stats    → Show miner statistics (specs generated, quality scores)
+#   make artifacts → List generated specs, code, and cache
+#   make clean    → Stop services and delete all output
+#   make rebuild  → Force rebuild Docker image from scratch
 
-IMAGE_NAME := compiled-ai
+IMAGE_NAME := compiled-ai-final
 CONTAINER_NAME_MINER := compiled-ai-miner
 CONTAINER_NAME_QDRANT := compiled-ai-qdrant
 OUTPUT_DIR := $(shell pwd)/output
 
-.PHONY: all build up down logs db artifacts stop clean rebuild
+.PHONY: all up down logs db query stats artifacts stop clean rebuild
 
 # Default: show help
 all:
 	@echo "Compiled AI — Available targets:"
-	@echo "  up        → Build image and start Qdrant + miner (docker-compose up -d)"
+	@echo "  up        → Build image and start Qdrant + miner (docker compose up -d)"
 	@echo "  down      → Stop and remove all services"
 	@echo "  logs      → Stream miner logs in real time"
 	@echo "  db        → Open Qdrant dashboard (http://localhost:6333/dashboard)"
+	@echo "  query     → Count points in Qdrant collection"
+	@echo "  stats     → Show miner stats: total specs, avg audit score, categories"
 	@echo "  artifacts → List generated specs, code, and cache in $(OUTPUT_DIR)"
 	@echo "  stop      → Kill the miner container only (Qdrant keeps running)"
-	@echo "  clean     → Stop all services and delete output/"
+	@echo "  clean     → Stop all services, delete output/, prune images"
 	@echo "  rebuild   → Force rebuild Docker image from scratch"
 
 # Bring up the full stack (Qdrant + miner)
@@ -51,7 +56,43 @@ db:
 	@echo "Opening Qdrant dashboard..."
 	@open http://localhost:6333/dashboard || xdg-open http://localhost:6333/dashboard || echo "Open http://localhost:6333/dashboard manually"
 
-# Build Docker image only (via docker-compose)
+# Query Qdrant collection point count
+query:
+	@curl -s -X POST http://localhost:6333/collections/compiled_ai_specs/points/count \
+		-H 'Content-Type: application/json' -d '{}' | \
+		python3 -m json.tool 2>/dev/null || echo "Qdrant not responding. Is 'make up' running?"
+
+# Show miner statistics from Qdrant payload data
+stats:
+	@echo "Miner Statistics (from Qdrant)..."
+	@curl -s -X POST http://localhost:6333/collections/compiled_ai_specs/points/scroll \
+		-H 'Content-Type: application/json' -d '{"limit": 100}' 2>/dev/null | \
+		python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    points = data.get('result', {}).get('points', [])
+    if not points:
+        print('  No points in collection yet.')
+        sys.exit(0)
+    total = len(points)
+    scores = [p['payload'].get('ctx_audit_score') for p in points if p['payload'].get('ctx_audit_score') is not None]
+    categories = {}
+    for p in points:
+        cat = p['payload'].get('category', 'unknown')
+        categories[cat] = categories.get(cat, 0) + 1
+    print(f'  Total specs mined:     {total}')
+    print(f'  Avg ctx audit score:   {sum(scores)/len(scores):.1f}' if scores else '  Avg ctx audit score:   N/A')
+    print(f'  Max audit score:       {max(scores):.1f}' if scores else '  Max audit score:       N/A')
+    print(f'  Min audit score:       {min(scores):.1f}' if scores else '  Min audit score:       N/A')
+    print('  Categories:')
+    for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+        print(f'    {cat:<20} {count}')
+except Exception as e:
+    print(f'  Error reading stats: {e}')
+" 2>/dev/null || echo "  Qdrant not responding. Is 'make up' running?"
+
+# Build Docker image only (via docker compose)
 build:
 	@docker compose build
 

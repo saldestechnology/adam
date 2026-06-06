@@ -12,7 +12,10 @@ services:
       - compiled-ai-net
 
   miner:
-    image: compiled-ai-loop-test:latest
+    image: compiled-ai-final:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: compiled-ai-miner
     restart: unless-stopped
     depends_on:
