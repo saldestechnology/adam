@@ -104,7 +104,7 @@ invoke_opencode_tools() {
 }
 
 # =====================================================================
-# Helper: build sentinel manifest JSON
+# Helper: build sentinel manifest JSON with optional ctx quality scores
 # =====================================================================
 build_manifest() {
   local ast_hash="$1"
@@ -122,7 +122,8 @@ build_manifest() {
     fi
   fi
 
-  cat >manifest.json <<MANIFEST
+  # Base manifest
+  cat > manifest.json <<MANIFEST
 {
   "sentinel_identity": "$SENTINEL_IDENTITY",
   "sentinel_version": "$SENTINEL_VERSION",
@@ -130,6 +131,96 @@ build_manifest() {
   "target_triple": "$TARGET_TRIPLE",
   "optimization_level": "$optimization_level",
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+MANIFEST
+}
+
+# =====================================================================
+# Helper: enrich manifest with ctx quality scores
+# =====================================================================
+enrich_manifest_with_ctx() {
+  if ! command -v ctx >/dev/null 2>&1; then
+    echo "  [Analyze] ctx not available, skipping quality analysis."
+    return
+  fi
+
+  echo "  [Analyze] Indexing codebase with ctx..."
+  if ctx index > .ctx_index.log 2>&1; then
+    echo "  [Analyze] Index complete."
+  else
+    echo "  [Analyze] ctx index failed (likely non-Rust or unsupported). Skipping."
+    return
+  fi
+
+  echo "  [Analyze] Running audit..."
+  local audit_score="null"
+  if ctx audit --output json > .ctx_audit.json 2> .ctx_audit.err; then
+    audit_score=$(python3 -c "
+import json, sys
+try:
+    with open('.ctx_audit.json') as f:
+        data = json.load(f)
+    print(data.get('overall_score', 'null'))
+except Exception:
+    print('null')
+" 2>/dev/null)
+  fi
+  if [ -z "$audit_score" ] || [ "$audit_score" = "null" ]; then
+    audit_score="null"
+  fi
+  echo "  [Analyze] Audit score: $audit_score"
+
+  echo "  [Analyze] Running complexity analysis..."
+  local max_complexity="null"
+  local symbol_count="null"
+  if ctx complexity --output json > .ctx_complexity.json 2> .ctx_complexity.err; then
+    max_complexity=$(python3 -c "
+import json, sys
+try:
+    with open('.ctx_complexity.json') as f:
+        data = json.load(f)
+    funcs = data.get('high_complexity_functions', [])
+    if funcs:
+        print(max(f.get('complexity_score', 0) for f in funcs))
+    else:
+        print('null')
+except Exception:
+    print('null')
+" 2>/dev/null)
+
+    symbol_count=$(python3 -c "
+import json, sys
+try:
+    with open('.ctx_complexity.json') as f:
+        data = json.load(f)
+    print(data.get('total_functions', 'null'))
+except Exception:
+    print('null')
+" 2>/dev/null)
+  fi
+  if [ -z "$max_complexity" ] || [ "$max_complexity" = "null" ]; then
+    max_complexity="null"
+  fi
+  if [ -z "$symbol_count" ] || [ "$symbol_count" = "null" ]; then
+    symbol_count="null"
+  fi
+  echo "  [Analyze] Max complexity: $max_complexity, Symbols: $symbol_count"
+
+  # Merge into manifest
+  python3 -c "
+import json
+with open('manifest.json', 'r') as f:
+    manifest = json.load(f)
+
+manifest['ctx_audit_score'] = ${audit_score:-null}
+manifest['ctx_max_complexity'] = ${max_complexity:-null}
+manifest['ctx_symbol_count'] = ${symbol_count:-null}
+
+with open('manifest.json', 'w') as f:
+    json.dump(manifest, f, indent=2)
+" 2>/dev/null
+
+  echo "  [Analyze] Manifest enriched with ctx quality metrics."
 }
 MANIFEST
 }
@@ -160,6 +251,10 @@ command -v harvest >/dev/null || {
   echo "Error: harvest not in PATH."
   exit 1
 }
+# ctx is optional but nice to have
+if command -v ctx >/dev/null; then
+  echo "[Sanity] ctx (code intelligence) available."
+fi
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Error: Must run inside a Git repo."
@@ -350,8 +445,9 @@ Use the write tool to create the file. Do not wrap your response in markdown cod
   # 4b. Sentinel Manifest
   build_manifest "$AST_HASH"
   echo "  [Harvest] Manifest built."
-
-  # 4c. Persist local copies (independent of Qdrant)
+  
+  # 4c. Code Quality Analysis (ctx)
+  enrich_manifest_with_ctx
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   cp "$SPEC_FILE" "$OUTPUT_DIR/spec_$TIMESTAMP.md"
   cp src/lib.rs "$OUTPUT_DIR/lib_$TIMESTAMP.rs"

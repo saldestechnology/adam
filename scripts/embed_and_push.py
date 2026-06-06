@@ -19,8 +19,8 @@ import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
-MODEL_NAME = os.environ.get("EMBED_MODEL", "jinaai/jina-embeddings-v2-base-code")
-VECTOR_SIZE = int(os.environ.get("EMBED_VECTOR_SIZE", "768"))
+MODEL_NAME = os.environ.get("EMBED_MODEL", "all-MiniLM-L6-v2")
+VECTOR_SIZE = int(os.environ.get("EMBED_VECTOR_SIZE", "384"))
 COLLECTION_NAME = os.environ.get("QDRANT_COLLECTION", "compiled_ai_specs")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 
@@ -28,8 +28,7 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 def load_embeddings_model():
     """Lazy-load the sentence-transformers model."""
     from sentence_transformers import SentenceTransformer
-    # Trust remote code for jina embeddings
-    return SentenceTransformer(MODEL_NAME, trust_remote_code=True)
+    return SentenceTransformer(MODEL_NAME)
 
 
 def ensure_collection(client: QdrantClient):

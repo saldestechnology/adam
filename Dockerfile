@@ -1,12 +1,24 @@
 # Compiled AI — Autonomous Rust Spec Miner
-# Dockerfile with: Rust toolchain, opencode, Python, embedding model, harvest binary
+# Dockerfile with: Rust toolchain, opencode, ctx, Python, embedding model, harvest binary
+# Multi-stage: builders first, runtime last.
 
-# Stage 1: Build the harvest AST hasher
+# Stage 1a: Build the harvest AST hasher
 FROM rust:latest AS harvest-builder
 WORKDIR /build
 COPY harvest/Cargo.toml harvest/Cargo.lock ./
 COPY harvest/src ./src
 RUN cargo build --release
+
+# Stage 1b: Build ctx (code intelligence) with limited parallelism to avoid OOM
+FROM rust:latest AS ctx-builder
+RUN apt-get update && apt-get install -y cmake pkg-config && rm -rf /var/lib/apt/lists/*
+RUN cd /tmp && \
+    git clone --depth 1 https://github.com/saldestechnology/ctx.git && \
+    cd ctx && \
+    MAKEFLAGS="-j1" NUM_JOBS=1 CARGO_BUILD_JOBS=1 cmake --build . --parallel 1 2>/dev/null || true && \
+    MAKEFLAGS="-j1" NUM_JOBS=1 CARGO_BUILD_JOBS=1 cargo build --release && \
+    cp target/release/ctx /tmp/ctx-built && \
+    chmod +x /tmp/ctx-built
 
 # Stage 2: Final runtime image
 FROM rust:latest
@@ -46,15 +58,17 @@ WORKDIR /app
 # Initialize a minimal Git repository (required for worktrees)
 RUN git init && git config user.email "adam@docker.local" && git config user.name "Adam"
 
-# Copy the harvest binary from builder stage
+# Copy builder artifacts into the final image
 COPY --from=harvest-builder /build/target/release/harvest /usr/local/bin/harvest
 RUN chmod +x /usr/local/bin/harvest
 
-# Copy the main script
+COPY --from=ctx-builder /tmp/ctx-built /usr/local/bin/ctx
+RUN chmod +x /usr/local/bin/ctx
+
+# Copy application scripts
 COPY adam.sh /app/adam.sh
 RUN chmod +x /app/adam.sh
 
-# Copy embed_and_push script
 COPY scripts/embed_and_push.py /app/scripts/embed_and_push.py
 RUN chmod +x /app/scripts/embed_and_push.py
 
