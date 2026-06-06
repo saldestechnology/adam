@@ -1,6 +1,17 @@
+# Compiled AI — Autonomous Rust Spec Miner
+# Dockerfile with: Rust toolchain, opencode, Python, embedding model, harvest binary
+
+# Stage 1: Build the harvest AST hasher
+FROM rust:latest AS harvest-builder
+WORKDIR /build
+COPY harvest/Cargo.toml harvest/Cargo.lock ./
+COPY harvest/src ./src
+RUN cargo build --release
+
+# Stage 2: Final runtime image
 FROM rust:latest
 
-# Install dependencies: git, python3, curl, tar
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
     python3 \
@@ -10,8 +21,24 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install opencode using the official install script
+# Install opencode CLI
 RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
+
+# Install Python packages for embedding + Qdrant
+RUN pip3 install --no-cache-dir \
+    "sentence-transformers" \
+    "qdrant-client" \
+    "numpy" \
+    --break-system-packages \
+    2>/dev/null || \
+    pip3 install --no-cache-dir \
+        "sentence-transformers" \
+        "qdrant-client" \
+        "numpy"
+
+# Pre-download the embedding model so it is baked into the image
+RUN python3 -c \
+    "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # Set working directory
 WORKDIR /app
@@ -19,14 +46,19 @@ WORKDIR /app
 # Initialize a minimal Git repository (required for worktrees)
 RUN git init && git config user.email "adam@docker.local" && git config user.name "Adam"
 
-# Copy the script
+# Copy the harvest binary from builder stage
+COPY --from=harvest-builder /build/target/release/harvest /usr/local/bin/harvest
+RUN chmod +x /usr/local/bin/harvest
+
+# Copy the main script
 COPY adam.sh /app/adam.sh
 RUN chmod +x /app/adam.sh
 
-# Copy the opencode TTY wrapper
-COPY opencode_wrapper.py /app/opencode_wrapper.py
+# Copy embed_and_push script
+COPY scripts/embed_and_push.py /app/scripts/embed_and_push.py
+RUN chmod +x /app/scripts/embed_and_push.py
 
-# Copy the system prompt (renamed from SYSTEM.md to AGENTS.md inside the container)
+# Copy system prompt (renamed for opencode consumption)
 COPY SYSTEM.md /app/AGENTS.md
 
 # Copy opencode project config
@@ -35,7 +67,7 @@ COPY .opencode /app/.opencode
 # Create output directory
 RUN mkdir -p /output
 
-# Redirect all tool homes to /output so only /output is written
+# Redirect tool homes to /output so only /output is written externally
 ENV HOME=/output
 ENV CARGO_HOME=/output/.cargo
 ENV XDG_CONFIG_HOME=/output/.config
@@ -43,5 +75,9 @@ ENV XDG_CACHE_HOME=/output/.cache
 ENV OUTPUT_DIR=/output
 ENV PATH="/root/.opencode/bin:${PATH}"
 
-# One-shot entrypoint
+# Embedding configuration
+ENV EMBED_MODEL="all-MiniLM-L6-v2"
+ENV EMBED_VECTOR_SIZE="384"
+
+# Continuous loop daemon entrypoint
 ENTRYPOINT ["/app/adam.sh"]
