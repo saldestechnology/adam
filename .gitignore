@@ -1,7 +1,12 @@
 output/
 AGENTS.md
 output*/
+__pycache__
 
 # Rust build artifacts
 harvest/target/
 *.lock
+
+# ctx artifacts
+.ctx
+.fastembed_cache

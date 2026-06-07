@@ -22,7 +22,9 @@ services:
       - qdrant
     volumes:
       - ./output:/output
+      - ./adam.sh:/app/adam.sh:ro
       - ./scripts/embed_and_push.py:/app/scripts/embed_and_push.py:ro
+      - ./scripts/batch_push_existing.py:/app/scripts/batch_push_existing.py:ro
     environment:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION=compiled_ai_specs

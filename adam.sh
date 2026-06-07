@@ -354,24 +354,35 @@ CRITICAL INSTRUCTIONS:
   GENERATED_SPEC=$(invoke_opencode_text "$MODEL_NAME" "$SPEC_PROMPT" 120)
   spec_exit=$?
 
+  # =====================================================================
+  # Corpus Fallback: if opencode fails or returns empty, recycle a
+  # previously-mined spec from the output/ directory.
+  # =====================================================================
   if [ "$spec_exit" -ne 0 ] && [ "$spec_exit" -ne 124 ]; then
-    echo "[Phase 1] Error: opencode failed (exit $spec_exit). Wiping worktree."
-    cd "$ROOT_DIR"
-    git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
-    git branch -D "$TEMP_BRANCH" >/dev/null 2>&1
-    rm -rf "$OUTPUT_DIR/.adam_worktrees"
-    sleep 5
-    continue
+    echo "[Phase 1] ⚠️ opencode failed (exit $spec_exit). Trying corpus fallback..."
   fi
 
-  if [ -z "$GENERATED_SPEC" ]; then
-    echo "[Phase 1] Error: empty spec. Wiping worktree."
-    cd "$ROOT_DIR"
-    git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
-    git branch -D "$TEMP_BRANCH" >/dev/null 2>&1
-    rm -rf "$OUTPUT_DIR/.adam_worktrees"
-    sleep 5
-    continue
+  if [ -z "$GENERATED_SPEC" ] || [ "$spec_exit" -ne 0 ]; then
+    # Find a random spec file from output/
+    corpus_spec=""
+    spec_files=("$OUTPUT_DIR"/spec_*.md)
+    if [ ${#spec_files[@]} -gt 0 ] && [ -f "${spec_files[0]}" ]; then
+      corpus_spec="${spec_files[RANDOM % ${#spec_files[@]}]}"
+    fi
+
+    if [ -n "$corpus_spec" ] && [ -f "$corpus_spec" ]; then
+      echo "[Phase 1] ♻️ Falling back to corpus spec: $(basename "$corpus_spec")"
+      cp "$corpus_spec" "$SPEC_FILE"
+      GENERATED_SPEC=$(cat "$SPEC_FILE")
+    else
+      echo "[Phase 1] ❌ No corpus available to fall back to. Wiping worktree."
+      cd "$ROOT_DIR"
+      git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
+      git branch -D "$TEMP_BRANCH" >/dev/null 2>&1
+      rm -rf "$OUTPUT_DIR/.adam_worktrees"
+      sleep 5
+      continue
+    fi
   fi
 
   # Strip markdown wrappers
@@ -413,12 +424,39 @@ If you need to analyze the current code state, you may use ctx:
       echo "  Warning: timed out after 5 minutes."
     fi
 
+    # Phase 2 corpus fallback: when opencode is rate-limited or empty,
+    # try recycling previously-compiled libs until one passes cargo check.
+    if [ "$gen_exit" -ne 0 ] && [ "$gen_exit" -ne 124 ] || [ ! -s src/lib.rs ]; then
+      echo "  ⚠️ opencode dead or empty lib.rs. Trying corpus code fallback..."
+      code_files=("$OUTPUT_DIR"/lib_*.rs)
+      if [ ${#code_files[@]} -gt 0 ] && [ -f "${code_files[0]}" ]; then
+        fb=0
+        while [ $fb -lt 5 ]; do
+          cl="${code_files[RANDOM % ${#code_files[@]}]}"
+          echo "    ♻️ Trying $(basename "$cl")..."
+          cp "$cl" src/lib.rs
+          echo "  [Sentinel] Compiling..."
+          cargo check >"$ERROR_LOG" 2>&1
+          if [ $? -eq 0 ]; then
+            echo "    ✅ Corpus code compiles!"
+            compile_ok=true
+            break 2
+          else
+            echo "    ❌ Failed, trying another..."
+          fi
+          fb=$((fb + 1))
+        done
+        echo "  ❌ Corpus fallback exhausted."
+      fi
+      # if we get here no corpus succeeded, but normal loop below will handle
+    fi
+
     if [ ! -s src/lib.rs ]; then
-      echo "  Error: src/lib.rs is empty."
+      echo "  Error: src/lib.rs is empty and no corpus fallback found."
       break
     fi
 
-    # Sentinel
+    # Normal sentinel compile
     echo "  [Sentinel] Compiling..."
     cargo check >"$ERROR_LOG" 2>&1
     compile_status=$?
