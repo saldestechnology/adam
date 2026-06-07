@@ -67,6 +67,15 @@ stats:
 	@echo "Miner Statistics (from Qdrant)..."
 	@python3 scripts/show_stats.py 2>/dev/null || echo "  Qdrant not responding. Is 'make up' running?"
 
+# Compile the whitepaper from Typst sources
+paper:
+	@typst compile docs/main.typ docs/whitepaper.pdf
+	@echo "Done: docs/whitepaper.pdf"
+
+# Watch-mode for live typst recompilation
+paper-watch:
+	@typst watch docs/main.typ docs/whitepaper.pdf
+
 # Build Docker image only (via docker compose)
 build:
 	@docker compose build
